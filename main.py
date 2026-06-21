@@ -1,13 +1,21 @@
 from __future__ import annotations
 
+import ipaddress
 import json
+import socket
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 from flask import Flask, render_template_string, request
 
 
 app = Flask(__name__)
+DEFAULT_API_URL = "https://api.github.com"
+ALLOWED_SCHEMES = {"https"}
+ALLOWED_CONTENT_TYPES = {"application/json", "text/plain", "text/csv"}
+MAX_RESPONSE_BYTES = 1024 * 1024
+RESPONSE_CHUNK_SIZE = 8192
 
 
 PAGE_TEMPLATE = """
@@ -158,29 +166,151 @@ PAGE_TEMPLATE = """
 """
 
 
-def format_response_body(response: requests.Response) -> str:
-    content_type = response.headers.get("content-type", "")
-    if "application/json" in content_type:
-        payload: Any = response.json()
+class URLValidationError(ValueError):
+    pass
+
+
+class ResponseValidationError(ValueError):
+    pass
+
+
+def validate_api_url(url: str) -> str:
+    url = url.strip()
+    parsed_url = urlparse(url)
+
+    if parsed_url.scheme not in ALLOWED_SCHEMES:
+        raise URLValidationError("https のURLのみ実行できます。")
+
+    if not parsed_url.hostname:
+        raise URLValidationError("ホスト名を含むURLを入力してください。")
+
+    if parsed_url.username or parsed_url.password:
+        raise URLValidationError("認証情報を含むURLは使用できません。")
+
+    try:
+        port = parsed_url.port or 443
+    except ValueError as error:
+        raise URLValidationError("ポート番号が不正です。") from error
+
+    try:
+        address_info = socket.getaddrinfo(parsed_url.hostname, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as error:
+        raise URLValidationError(f"ホスト名を解決できません: {parsed_url.hostname}") from error
+
+    resolved_ips = {info[4][0] for info in address_info}
+    for resolved_ip in resolved_ips:
+        ip_address = ipaddress.ip_address(resolved_ip)
+        if not ip_address.is_global:
+            raise URLValidationError(
+                "localhost、プライベートIP、リンクローカルIPなどの内部アドレスにはアクセスできません。"
+            )
+
+    return url
+
+
+def get_content_type(response: requests.Response) -> str:
+    return response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+
+
+def validate_response_headers(response: requests.Response) -> str:
+    content_type = get_content_type(response)
+    if not content_type:
+        raise ResponseValidationError("Content-Type がないレスポンスは受け付けません。")
+
+    is_allowed_content_type = content_type in ALLOWED_CONTENT_TYPES or content_type.endswith("+json")
+    if not is_allowed_content_type:
+        raise ResponseValidationError(f"対象外の Content-Type です: {content_type}")
+
+    content_length = response.headers.get("content-length")
+    if content_length is not None:
+        try:
+            content_length_bytes = int(content_length)
+        except ValueError as error:
+            raise ResponseValidationError("Content-Length が不正です。") from error
+
+        if content_length_bytes < 0:
+            raise ResponseValidationError("Content-Length が不正です。")
+
+        if content_length_bytes > MAX_RESPONSE_BYTES:
+            raise ResponseValidationError(
+                f"レスポンスが大きすぎます。最大 {MAX_RESPONSE_BYTES} bytes までです。"
+            )
+
+    return content_type
+
+
+def read_limited_response(response: requests.Response) -> bytes:
+    chunks = []
+    total_bytes = 0
+
+    for chunk in response.iter_content(chunk_size=RESPONSE_CHUNK_SIZE):
+        if not chunk:
+            continue
+
+        total_bytes += len(chunk)
+        if total_bytes > MAX_RESPONSE_BYTES:
+            raise ResponseValidationError(
+                f"レスポンスが大きすぎます。最大 {MAX_RESPONSE_BYTES} bytes までです。"
+            )
+
+        chunks.append(chunk)
+
+    return b"".join(chunks)
+
+
+def decode_response_body(response: requests.Response, body: bytes) -> str:
+    encoding = response.encoding or "utf-8"
+    return body.decode(encoding, errors="replace")
+
+
+def format_response_body(response: requests.Response, body: bytes) -> str:
+    content_type = get_content_type(response)
+    body_text = decode_response_body(response, body)
+
+    if content_type == "application/json" or content_type.endswith("+json"):
+        payload: Any = json.loads(body_text)
         return json.dumps(payload, ensure_ascii=False, indent=2)
 
-    return response.text[:5000]
+    return body_text
 
 
 @app.route("/", methods=["GET", "POST"])
 def index() -> str:
-    url = request.form.get("url", "https://api.github.com")
+    url = request.form.get("url", DEFAULT_API_URL)
     result = None
 
     if request.method == "POST":
         try:
-            response = requests.get(url, timeout=10)
-            response.raise_for_status()
+            validated_url = validate_api_url(url)
+            with requests.get(
+                validated_url,
+                timeout=(3, 10),
+                allow_redirects=False,
+                stream=True,
+            ) as response:
+                validate_response_headers(response)
+                response_body = read_limited_response(response)
+                formatted_body = format_response_body(response, response_body)
+
             result = {
                 "title": "実行結果",
                 "status_code": response.status_code,
-                "body": format_response_body(response),
-                "error": False,
+                "body": formatted_body,
+                "error": response.status_code >= 400,
+            }
+        except URLValidationError as error:
+            result = {
+                "title": "URLエラー",
+                "status_code": None,
+                "body": str(error),
+                "error": True,
+            }
+        except ResponseValidationError as error:
+            result = {
+                "title": "レスポンスエラー",
+                "status_code": None,
+                "body": str(error),
+                "error": True,
             }
         except requests.RequestException as error:
             result = {
@@ -201,4 +331,4 @@ def index() -> str:
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(host="127.0.0.1", port=5000, debug=False)
