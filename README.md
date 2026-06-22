@@ -12,7 +12,8 @@ API Runner is a small Flask web app for sending GET requests to a URL from a bro
 
 ## Requirements
 
-- Python 3.14
+- Python 3.10 or later
+- Tested with Python 3.14
 - pip
 
 This project expects commands to use the local virtual environment at `.venv`.

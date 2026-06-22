@@ -1,3 +1,23 @@
 __pycache__/
 *.py[cod]
 .venv/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# macOS
+.DS_Store
+
+# Tests and coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editors
+.vscode/
+.idea/
+
+# Logs
+*.log
