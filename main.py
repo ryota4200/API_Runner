@@ -3,6 +3,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import socket
+import os
 from typing import Any
 from urllib.parse import urlparse
 
@@ -331,4 +332,6 @@ def index() -> str:
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=False)
+    host = os.getenv("APP_HOST", "127.0.0.1")
+    port = int(os.getenv("APP_PORT", "5000"))
+    app.run(host=host, port=port, debug=False)

@@ -14,7 +14,7 @@ def test_index_returns_success(client):
     """トップページが正常に表示されることを確認する"""
     response = client.get('/')
     
-    assert response.status_code == 400
+    assert response.status_code == 200
     assert b"API Runner" in response.data
 
 def test_validate_public_https_url(monkeypatch):
